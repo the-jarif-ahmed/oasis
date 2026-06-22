@@ -1,0 +1,13 @@
+{
+  "name": "oasis",
+  "version": "1.0.0",
+  "description": "Gamified clinical assessment MVP with sliding tile puzzle session logging.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check app.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

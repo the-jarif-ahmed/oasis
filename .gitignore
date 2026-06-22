@@ -1,0 +1,21 @@
+# IDEs and Editors
+.vscode/
+.cursor/
+.antigravity/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python (if you use it)
+__pycache__/
+*.py[cod]
+*.class
+venv/
+.env
+
+# Node.js (if you use it)
+node_modules/
+dist/
+data/
