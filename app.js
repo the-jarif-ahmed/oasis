@@ -13,6 +13,8 @@ const DIFFICULTIES = {
   hard: { label: "Hard", size: 5 },
 };
 
+const A_STAR_SEARCH_CAP = 5000;
+
 const app = document.querySelector("#app");
 const homeButton = document.querySelector("#homeButton");
 const loginButton = document.querySelector("#loginButton");
@@ -32,6 +34,7 @@ const state = {
   selectedSessionId: null,
   selectedSession: null,
   timerId: null,
+  hintHighlightTimerId: null,
 };
 
 function presetImage(preset) {
@@ -102,7 +105,8 @@ function setTimer(active) {
 }
 
 function render() {
-  loginButton.classList.toggle("hidden", state.view === "dashboard");
+  const canOpenDashboard = state.view === "home" || state.view === "thanks";
+  loginButton.classList.toggle("hidden", !canOpenDashboard);
 
   if (state.view !== "game") {
     setTimer(false);
@@ -244,6 +248,8 @@ async function startGame(event) {
       imageUrl: presetImage(selectedPreset),
       startedAtMs: Date.now(),
       moves: 0,
+      hints: 0,
+      highlightedHintTile: null,
       tiles: shuffledTiles(boardSize),
       finished: false,
     };
@@ -314,12 +320,14 @@ function renderGame() {
         ${tiles}
       </div>
       <div class="game-actions">
-        <button class="secondary-button" id="exitGameButton" type="button">Exit</button>
+        <button class="hint-button" id="hintButton" type="button">Hint</button>
+        <button class="exit-button" id="exitGameButton" type="button">Exit</button>
       </div>
     </section>
   `;
 
   document.querySelector("#puzzleBoard").addEventListener("click", onTileClick);
+  document.querySelector("#hintButton").addEventListener("click", handleHintClick);
   document.querySelector("#exitGameButton").addEventListener("click", () => finishGame("exited"));
 }
 
@@ -334,9 +342,11 @@ function tileMarkup(tile, index, size, imageUrl) {
   const positionX = size === 1 ? 0 : (col / (size - 1)) * 100;
   const positionY = size === 1 ? 0 : (row / (size - 1)) * 100;
 
+  const highlightClass = state.currentSession?.highlightedHintTile === tile ? " hint-highlight" : "";
+
   return `
     <button
-      class="tile"
+      class="tile${highlightClass}"
       type="button"
       data-index="${index}"
       style="background-image: url('${imageUrl}'); background-position: ${positionX}% ${positionY}%"
@@ -357,20 +367,69 @@ function onTileClick(event) {
 
   if (!areAdjacent(index, emptyIndex, session.boardSize)) return;
 
+  performTileMove(index, { countMove: true, countHint: false, highlight: false });
+}
+
+function performTileMove(index, options) {
+  const session = state.currentSession;
+  const emptyIndex = session.tiles.indexOf(0);
+  const movedTile = session.tiles[index];
+
   [session.tiles[index], session.tiles[emptyIndex]] = [session.tiles[emptyIndex], session.tiles[index]];
-  session.moves += 1;
+
+  if (options.countMove) {
+    session.moves += 1;
+  }
+
+  if (options.countHint) {
+    session.hints += 1;
+  }
+
+  if (options.highlight) {
+    setHintHighlight(movedTile);
+  } else {
+    session.highlightedHintTile = null;
+  }
 
   if (isSolved(session.tiles)) {
     finishGame("completed");
     return;
   }
 
-  if (session.moveLimit && session.moves >= session.moveLimit) {
+  if (options.countMove && session.moveLimit && session.moves >= session.moveLimit) {
     finishGame("move_limit");
     return;
   }
 
   renderGame();
+}
+
+function handleHintClick() {
+  const session = state.currentSession;
+  if (!session || session.finished || isSolved(session.tiles)) return;
+
+  const move = findBestHintMove(session.tiles, session.boardSize);
+  if (move === null) return;
+
+  performTileMove(move, { countMove: false, countHint: true, highlight: true });
+}
+
+function setHintHighlight(tile) {
+  const session = state.currentSession;
+  if (!session) return;
+
+  session.highlightedHintTile = tile;
+
+  if (state.hintHighlightTimerId) {
+    clearTimeout(state.hintHighlightTimerId);
+  }
+
+  state.hintHighlightTimerId = setTimeout(() => {
+    if (state.currentSession && state.currentSession.highlightedHintTile === tile) {
+      state.currentSession.highlightedHintTile = null;
+      if (state.view === "game") renderGame();
+    }
+  }, 650);
 }
 
 function areAdjacent(a, b, size) {
@@ -379,6 +438,154 @@ function areAdjacent(a, b, size) {
   const aCol = a % size;
   const bCol = b % size;
   return Math.abs(aRow - bRow) + Math.abs(aCol - bCol) === 1;
+}
+
+function boardKey(tiles) {
+  return tiles.join(",");
+}
+
+function manhattanDistance(tiles, size) {
+  return tiles.reduce((total, tile, index) => {
+    if (tile === 0) return total;
+
+    const currentRow = Math.floor(index / size);
+    const currentCol = index % size;
+    const targetIndex = tile - 1;
+    const targetRow = Math.floor(targetIndex / size);
+    const targetCol = targetIndex % size;
+
+    return total + Math.abs(currentRow - targetRow) + Math.abs(currentCol - targetCol);
+  }, 0);
+}
+
+function hintNeighbors(tiles, size) {
+  const emptyIndex = tiles.indexOf(0);
+  return adjacentIndexes(emptyIndex, size).map((tileIndex) => {
+    const nextTiles = tiles.slice();
+    const movedTile = nextTiles[tileIndex];
+    [nextTiles[tileIndex], nextTiles[emptyIndex]] = [nextTiles[emptyIndex], nextTiles[tileIndex]];
+    return { tiles: nextTiles, moveIndex: tileIndex, movedTile };
+  });
+}
+
+function adjacentIndexes(index, size) {
+  const row = Math.floor(index / size);
+  const col = index % size;
+  const indexes = [];
+
+  if (row > 0) indexes.push(index - size);
+  if (row < size - 1) indexes.push(index + size);
+  if (col > 0) indexes.push(index - 1);
+  if (col < size - 1) indexes.push(index + 1);
+
+  return indexes;
+}
+
+function findBestHintMove(tiles, size) {
+  const aStarMove = boundedAStarFirstMove(tiles, size);
+  if (aStarMove !== null) {
+    return aStarMove;
+  }
+
+  return greedyHintMove(tiles, size);
+}
+
+function boundedAStarFirstMove(tiles, size) {
+  const startKey = boardKey(tiles);
+  const open = [];
+  pushSearchNode(open, {
+    tiles: tiles.slice(),
+    g: 0,
+    h: manhattanDistance(tiles, size),
+    firstMove: null,
+    key: startKey,
+  });
+  const bestCosts = new Map([[startKey, 0]]);
+  let explored = 0;
+
+  while (open.length > 0 && explored < A_STAR_SEARCH_CAP) {
+    const current = popSearchNode(open);
+    explored += 1;
+
+    if (isSolved(current.tiles)) {
+      return current.firstMove;
+    }
+
+    for (const neighbor of hintNeighbors(current.tiles, size)) {
+      const nextG = current.g + 1;
+      const key = boardKey(neighbor.tiles);
+      const knownBest = bestCosts.get(key);
+
+      if (knownBest !== undefined && knownBest <= nextG) {
+        continue;
+      }
+
+      bestCosts.set(key, nextG);
+      pushSearchNode(open, {
+        tiles: neighbor.tiles,
+        g: nextG,
+        h: manhattanDistance(neighbor.tiles, size),
+        firstMove: current.firstMove ?? neighbor.moveIndex,
+        key,
+      });
+    }
+  }
+
+  return null;
+}
+
+function searchScore(node) {
+  return node.g + node.h;
+}
+
+function pushSearchNode(heap, node) {
+  heap.push(node);
+  let index = heap.length - 1;
+
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2);
+    if (searchScore(heap[parentIndex]) <= searchScore(heap[index])) break;
+    [heap[parentIndex], heap[index]] = [heap[index], heap[parentIndex]];
+    index = parentIndex;
+  }
+}
+
+function popSearchNode(heap) {
+  const top = heap[0];
+  const last = heap.pop();
+
+  if (heap.length > 0) {
+    heap[0] = last;
+    let index = 0;
+
+    while (true) {
+      const leftIndex = index * 2 + 1;
+      const rightIndex = index * 2 + 2;
+      let smallestIndex = index;
+
+      if (leftIndex < heap.length && searchScore(heap[leftIndex]) < searchScore(heap[smallestIndex])) {
+        smallestIndex = leftIndex;
+      }
+
+      if (rightIndex < heap.length && searchScore(heap[rightIndex]) < searchScore(heap[smallestIndex])) {
+        smallestIndex = rightIndex;
+      }
+
+      if (smallestIndex === index) break;
+      [heap[index], heap[smallestIndex]] = [heap[smallestIndex], heap[index]];
+      index = smallestIndex;
+    }
+  }
+
+  return top;
+}
+
+function greedyHintMove(tiles, size) {
+  const neighbors = hintNeighbors(tiles, size);
+  if (neighbors.length === 0) return null;
+
+  neighbors.sort((a, b) => manhattanDistance(a.tiles, size) - manhattanDistance(b.tiles, size));
+  return neighbors[0].moveIndex;
 }
 
 function updateGameMetrics() {
@@ -397,6 +604,7 @@ async function finishGame(status) {
       body: JSON.stringify({
         completionStatus: status,
         moveCount: state.currentSession.moves,
+        hintCount: state.currentSession.hints,
         totalTimeSeconds: elapsedSeconds(),
       }),
     });
@@ -505,7 +713,10 @@ function renderDashboard() {
       </div>
       <div class="dashboard-layout">
         <div>
-          <h2>Sessions</h2>
+          <div class="sessions-heading">
+            <h2>Sessions</h2>
+            <button class="reset-button" id="resetHistoryButton" type="button">reset</button>
+          </div>
           <div class="session-list" id="sessionList">
             ${rows || `<p class="empty-state">No session data yet.</p>`}
           </div>
@@ -532,6 +743,8 @@ function renderDashboard() {
   if (deleteButton) {
     deleteButton.addEventListener("click", deleteSelectedSession);
   }
+
+  document.querySelector("#resetHistoryButton").addEventListener("click", resetHistory);
 }
 
 function detailMarkup(session) {
@@ -560,6 +773,7 @@ function detailMarkup(session) {
       <div><span>Moves</span><strong>${session.moveCount}</strong></div>
       <div><span>Time Limit</span><strong>${formatLimit(session.timeLimitSeconds, "s")}</strong></div>
       <div><span>Move Limit</span><strong>${formatLimit(session.moveLimit, "moves")}</strong></div>
+      <div><span>Hints</span><strong>${session.hintCount ?? 0}</strong></div>
     </div>
     <div class="detail-actions">
       ${deleteControl}
@@ -577,9 +791,27 @@ async function deleteSelectedSession() {
   await loadDashboard();
 }
 
+async function resetHistory() {
+  const confirmed = window.confirm("Reset all session history? This cannot be undone.");
+  if (!confirmed) return;
+
+  await api(`/api/sessions?pin=${encodeURIComponent(state.dashboardPin)}`, {
+    method: "DELETE",
+  });
+
+  state.sessions = [];
+  state.selectedSessionId = null;
+  state.selectedSession = null;
+  renderDashboard();
+}
+
 function goHome() {
   state.view = "home";
   state.currentSession = null;
+  if (state.hintHighlightTimerId) {
+    clearTimeout(state.hintHighlightTimerId);
+    state.hintHighlightTimerId = null;
+  }
   state.selectedSession = null;
   state.selectedSessionId = null;
   render();

@@ -26,9 +26,16 @@ db.exec(`
     ended_at TEXT,
     total_time_seconds INTEGER,
     move_count INTEGER NOT NULL DEFAULT 0,
+    hint_count INTEGER NOT NULL DEFAULT 0,
     completion_status TEXT NOT NULL DEFAULT 'started'
   )
 `);
+
+const sessionColumns = db.prepare("PRAGMA table_info(sessions)").all();
+const hasHintCount = sessionColumns.some((column) => column.name === "hint_count");
+if (!hasHintCount) {
+  db.exec("ALTER TABLE sessions ADD COLUMN hint_count INTEGER NOT NULL DEFAULT 0");
+}
 
 app.use(express.json({ limit: "64kb" }));
 app.use(express.static(__dirname));
@@ -141,6 +148,7 @@ app.patch("/api/sessions/:id/finish", (req, res) => {
   const id = Number(req.params.id);
   const status = cleanText(req.body.completionStatus, 20);
   const moveCount = Number(req.body.moveCount);
+  const hintCount = req.body.hintCount === undefined ? 0 : Number(req.body.hintCount);
   const totalTimeSeconds = Number(req.body.totalTimeSeconds);
   const allowedStatuses = ["completed", "exited", "time_limit", "move_limit"];
 
@@ -159,6 +167,11 @@ app.patch("/api/sessions/:id/finish", (req, res) => {
     return;
   }
 
+  if (!Number.isInteger(hintCount) || hintCount < 0) {
+    res.status(400).json({ error: "Invalid hint count" });
+    return;
+  }
+
   if (!Number.isInteger(totalTimeSeconds) || totalTimeSeconds < 0) {
     res.status(400).json({ error: "Invalid total time" });
     return;
@@ -170,10 +183,11 @@ app.patch("/api/sessions/:id/finish", (req, res) => {
       SET ended_at = ?,
           total_time_seconds = ?,
           move_count = ?,
+          hint_count = ?,
           completion_status = ?
       WHERE id = ?
     `)
-    .run(new Date().toISOString(), totalTimeSeconds, moveCount, status, id);
+    .run(new Date().toISOString(), totalTimeSeconds, moveCount, hintCount, status, id);
 
   if (result.changes === 0) {
     res.status(404).json({ error: "Session not found" });
@@ -199,6 +213,7 @@ app.get("/api/sessions", requirePin, (req, res) => {
         ended_at AS endedAt,
         total_time_seconds AS totalTimeSeconds,
         move_count AS moveCount,
+        hint_count AS hintCount,
         completion_status AS completionStatus
       FROM sessions
       ORDER BY datetime(started_at) DESC, id DESC
@@ -230,6 +245,7 @@ app.get("/api/sessions/:id", requirePin, (req, res) => {
         ended_at AS endedAt,
         total_time_seconds AS totalTimeSeconds,
         move_count AS moveCount,
+        hint_count AS hintCount,
         completion_status AS completionStatus
       FROM sessions
       WHERE id = ?
@@ -242,6 +258,11 @@ app.get("/api/sessions/:id", requirePin, (req, res) => {
   }
 
   res.json({ session: row });
+});
+
+app.delete("/api/sessions", requirePin, (req, res) => {
+  const result = db.prepare("DELETE FROM sessions").run();
+  res.json({ ok: true, deletedCount: result.changes });
 });
 
 app.delete("/api/sessions/:id", requirePin, (req, res) => {
